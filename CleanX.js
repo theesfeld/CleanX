@@ -474,7 +474,6 @@
 					reportedCountry: info.reportedCountry || null,
 					ts: nowTs(),
 				};
-				enqueueSyncEntry(user, config.knownUsers[user]);
 				if (info.accountCountry) {
 					const code = info.accountCountry;
 					if (!config.countryDB[code]) config.countryDB[code] = [];
