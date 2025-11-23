@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      5.1
 // @description  Block by country & language — completely empty by default. You decide everything.
-// @author       You
+// @author       A Pleasant Experience
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @grant        GM_xmlhttpRequest
