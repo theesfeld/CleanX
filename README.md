@@ -139,8 +139,3 @@ This project is provided under the MIT License. See the LICENSE file for details
 
 Acknowledgements
 - Built for people who want more control over their x.com feed by filtering content locally in the browser.
-
-If you'd like, I can:
-- Add badge(s) (build / license).
-- Generate a smaller README variant for display on GitHub (shorter / with screenshots).
-- Create a template config file (config.example.json) in the repo.
