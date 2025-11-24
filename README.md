@@ -1,5 +1,8 @@
 # CleanX
 
+<img width="820" height="1258" alt="image" src="https://github.com/user-attachments/assets/21a051b7-4b76-4d26-9e5b-a19427169cf0" />
+
+
 CleanX helps you clean your x.com feed by blocking or hiding accounts based on their account creation country and/or languages. It's a lightweight, client-side tool intended to run in your browser (userscript or unpacked extension) and filter feed items before they reach your eyes.
 
 - Repository: theesfeld/CleanX
