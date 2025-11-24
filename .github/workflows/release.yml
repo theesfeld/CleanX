@@ -30,6 +30,9 @@ jobs:
             range=""
           fi
           git log --no-merges --format="* %s (%h)" $range > dist/CHANGELOG.md
+          if [ ! -s dist/CHANGELOG.md ]; then
+            echo "* No recorded changes for this release (${GITHUB_REF##*/})." > dist/CHANGELOG.md
+          fi
 
       - name: Upload build artifacts (main/master)
         if: startsWith(github.ref, 'refs/heads/')
