@@ -709,6 +709,26 @@
 		return;
 	}
 
+	function addFlagOverlay(tweet, countryCode) {
+		if (!countryCode) return;
+		const flag = countryCodeToFlag(countryCode);
+		if (!flag) return;
+		const existingId = tweet.dataset.xcbOverlayId;
+		if (existingId) {
+			const existing = document.getElementById(existingId);
+			if (existing) existing.remove();
+			delete tweet.dataset.xcbOverlayId;
+		}
+		const overlay = document.createElement("div");
+		const id = `xcb-overlay-${Math.random().toString(36).slice(2, 9)}`;
+		overlay.id = id;
+		overlay.textContent = flag;
+		overlay.style =
+			"position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:96px;opacity:0.08;pointer-events:none;user-select:none;filter:saturate(0.9);z-index:1;";
+		tweet.appendChild(overlay);
+		tweet.dataset.xcbOverlayId = id;
+	}
+
 	function renderFooterInfo(tweet, countryCode, usernameChanges) {
 		const rowId = tweet.dataset.xcbFooterId;
 		const hasCountry = Boolean(countryCode);
@@ -788,6 +808,12 @@
 			tweet.style.position = tweet.dataset.xcbPrevPosition;
 			delete tweet.dataset.xcbPrevPosition;
 		}
+		const overlayId = tweet.dataset.xcbOverlayId;
+		if (overlayId) {
+			const overlayEl = document.getElementById(overlayId);
+			if (overlayEl) overlayEl.remove();
+			delete tweet.dataset.xcbOverlayId;
+		}
 		tweet.style.removeProperty("outline");
 		tweet.style.removeProperty("outline-offset");
 		tweet.style.removeProperty("box-shadow");
@@ -845,6 +871,7 @@
 			"position:absolute;top:-10px;left:-10px;background:#ff4d4f;color:#fff;padding:6px 10px;border-radius:10px;font-size:12px;font-weight:bold;box-shadow:0 4px 12px rgba(0,0,0,0.25);z-index:2;";
 		tweet.appendChild(badge);
 		tweet.dataset.xcbBadgeId = badgeId;
+		addFlagOverlay(tweet, countryCode);
 	}
 
 	function markRegionOnlyHighlight(tweet, regionName) {
