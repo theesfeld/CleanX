@@ -20,7 +20,7 @@
 		blockedCountries: new Set(), // ← EMPTY
 		blockedLangs: new Set(), // ← EMPTY
 		countryDB: {}, // code -> [usernames]
-		knownUsers: {}, // username -> { accountCountry, reportedCountry, ts }
+		knownUsers: {}, // username -> { accountCountry, ts }
 		pending: new Set(),
 	};
 	const fetchQueue = [];
@@ -33,6 +33,8 @@
 	const UNKNOWN_RETRY_MS = 10 * 60 * 1000; // retry unknowns after 10m
 	const PREFETCH_BATCH = 5;
 	const PREFETCH_INTERVAL_MS = 4000;
+	const blockStats = { country: {}, lang: {} }; // session-only counts
+	let dbPromise = null;
 	const FIELD_TOGGLES = { withAuxiliaryUserLabels: false };
 	const BEARER_TOKEN =
 		"AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
@@ -197,7 +199,6 @@
 			config.blockedCountries = new Set(parsed.blockedCountries || []);
 			config.blockedLangs = new Set(parsed.blockedLangs || []);
 			config.countryDB = parsed.countryDB || {};
-			config.knownUsers = parsed.knownUsers || {};
 		}
 	}
 	function save() {
@@ -207,15 +208,6 @@
 				blockedCountries: Array.from(config.blockedCountries),
 				blockedLangs: Array.from(config.blockedLangs),
 				countryDB: config.countryDB,
-				knownUsers: config.knownUsers,
-				syncReadUrl: config.syncReadUrl || "",
-				syncWriteUrl: config.syncWriteUrl || "",
-				syncApiKey: config.syncApiKey || "",
-				syncSalt: config.syncSalt || "",
-				saltVersion: config.saltVersion || 0,
-				syncPublicKey: config.syncPublicKey || "",
-				syncPrivateKey: config.syncPrivateKey || "",
-				lastPull: config.lastPull || 0,
 			}),
 		);
 	}
@@ -229,6 +221,59 @@
 			null,
 			2,
 		);
+	}
+
+	function openDB() {
+		if (dbPromise) return dbPromise;
+		dbPromise = new Promise((resolve, reject) => {
+			const req = indexedDB.open("xcb-country-blocker", 1);
+			req.onerror = () => reject(req.error);
+			req.onupgradeneeded = () => {
+				const db = req.result;
+				if (!db.objectStoreNames.contains("known")) {
+					db.createObjectStore("known", { keyPath: "user" });
+				}
+			};
+			req.onsuccess = () => resolve(req.result);
+		});
+		return dbPromise;
+	}
+
+	async function loadKnownFromDB() {
+		try {
+			const db = await openDB();
+			const tx = db.transaction("known", "readonly");
+			const store = tx.objectStore("known");
+			const rows = await new Promise((resolve, reject) => {
+				const req = store.getAll();
+				req.onsuccess = () => resolve(req.result || []);
+				req.onerror = () => reject(req.error);
+			});
+			config.knownUsers = {};
+			for (const row of rows) {
+				if (!row?.user) continue;
+				config.knownUsers[row.user] = {
+					accountCountry: row.accountCountry || null,
+					ts: row.ts || 0,
+				};
+			}
+		} catch (e) {
+			console.warn("[XCB] loadKnownFromDB failed", e);
+		}
+	}
+
+	async function saveKnownToDB(user, data) {
+		try {
+			const db = await openDB();
+			const tx = db.transaction("known", "readwrite");
+			tx.objectStore("known").put({
+				user,
+				accountCountry: data.accountCountry || null,
+				ts: data.ts || nowTs(),
+			});
+		} catch (e) {
+			console.warn("[XCB] saveKnownToDB failed", e);
+		}
 	}
 	load();
 
@@ -268,7 +313,11 @@
 		const raw = input.trim();
 		if (!raw) return null;
 		const upper = raw.toUpperCase();
-		if (upper.length === 2 && COUNTRY_MAP && Object.values(COUNTRY_MAP).includes(upper))
+		if (
+			upper.length === 2 &&
+			COUNTRY_MAP &&
+			Object.values(COUNTRY_MAP).includes(upper)
+		)
 			return upper;
 		// fuzzy by country name substring
 		const found = Object.entries(COUNTRY_MAP).find(([name]) =>
@@ -299,11 +348,13 @@
 		console.log("Blocked:", reason);
 		blockedCount += 1;
 		const counterEl = document.getElementById("xcb-blocked-count");
-		if (counterEl) counterEl.textContent = `Blocked this session: ${blockedCount}`;
+		if (counterEl)
+			counterEl.textContent = `Blocked this session: ${blockedCount}`;
 	}
 
 	function parseProfileFromJson(obj) {
-		if (!obj || typeof obj !== "object") return { accountCountry: null, reportedCountry: null };
+		if (!obj || typeof obj !== "object")
+			return { accountCountry: null };
 		const result =
 			obj.user?.result ||
 			obj.user_result_by_screen_name?.result ||
@@ -313,7 +364,7 @@
 			obj.data?.about_account?.result ||
 			obj.data?.user;
 
-		if (!result) return { accountCountry: null, reportedCountry: null };
+		if (!result) return { accountCountry: null };
 
 		const about =
 			result.aboutModule ||
@@ -338,20 +389,11 @@
 			aboutProfile?.accountBasedIn ||
 			null;
 		const accountCountry = accountCountryRaw
-			? COUNTRY_MAP[accountCountryRaw] || accountCountryRaw.slice(0, 2).toUpperCase()
+			? COUNTRY_MAP[accountCountryRaw] ||
+				accountCountryRaw.slice(0, 2).toUpperCase()
 			: null;
 
-		const reportedRaw =
-			about?.reportedLocation ||
-			result.legacy?.location ||
-			result.profile?.location ||
-			aboutProfile?.location ||
-			null;
-		const reportedCountry = reportedRaw
-			? resolveCountryCode(reportedRaw) || reportedRaw
-			: null;
-
-		return { accountCountry, reportedCountry };
+		return { accountCountry };
 	}
 
 	function getCsrfToken() {
@@ -365,25 +407,9 @@
 			return false;
 		const known = config.knownUsers[user];
 		if (!known) return true;
-		if (known.accountCountry || known.reportedCountry) return false;
+		if (known.accountCountry) return false;
 		if (known.ts && nowTs() - known.ts < UNKNOWN_RETRY_MS) return false;
 		return true;
-	}
-
-	function queueUser(user) {
-		const u = normUser(user);
-		if (!needsFetch(u)) return;
-		if (config.pending.has(u)) return;
-		if (fetchQueue.includes(u)) return;
-		fetchQueue.push(u);
-	}
-
-	async function sha256Hex(str) {
-		const enc = new TextEncoder().encode(str);
-		const hash = await crypto.subtle.digest("SHA-256", enc);
-		return Array.from(new Uint8Array(hash))
-			.map((b) => b.toString(16).padStart(2, "0"))
-			.join("");
 	}
 
 	function queueUser(user) {
@@ -400,7 +426,7 @@
 
 		const known = config.knownUsers[user];
 		if (known) {
-			if (known.accountCountry || known.reportedCountry) return;
+			if (known.accountCountry) return;
 			if (known.ts && nowTs() - known.ts < UNKNOWN_RETRY_MS) return;
 		}
 		if (config.pending.has(user)) return false;
@@ -413,7 +439,10 @@
 		const now = nowTs();
 		if (now < nextFetchAllowed) {
 			// schedule retry later by stamping ts to avoid tight loop
-			config.knownUsers[user] = { accountCountry: null, reportedCountry: null, ts: now };
+			config.knownUsers[user] = {
+				accountCountry: null,
+				ts: now,
+			};
 			return false;
 		}
 
@@ -448,7 +477,10 @@
 			)
 			.then(({ status, body }) => {
 				if (status === 429) {
-					nextFetchAllowed = Math.max(nextFetchAllowed, nowTs() + RATE_LIMIT_BACKOFF_MS);
+					nextFetchAllowed = Math.max(
+						nextFetchAllowed,
+						nowTs() + RATE_LIMIT_BACKOFF_MS,
+					);
 					config.pending.delete(user);
 					queueUser(user);
 					return;
@@ -460,10 +492,9 @@
 				}
 				const info = parseProfileFromJson(body);
 				console.log("[XCB] about json", user, info);
-				if (!info.accountCountry && !info.reportedCountry) {
+				if (!info.accountCountry) {
 					config.knownUsers[user] = {
 						accountCountry: null,
-						reportedCountry: null,
 						ts: nowTs(),
 					};
 					save();
@@ -471,9 +502,9 @@
 				}
 				config.knownUsers[user] = {
 					accountCountry: info.accountCountry || null,
-					reportedCountry: info.reportedCountry || null,
 					ts: nowTs(),
 				};
+				saveKnownToDB(user, config.knownUsers[user]);
 				if (info.accountCountry) {
 					const code = info.accountCountry;
 					if (!config.countryDB[code]) config.countryDB[code] = [];
@@ -509,14 +540,17 @@
 				const langMatch = hasBlockedLang(text);
 				let reason = langMatch ? `Lang:${langMatch}` : "";
 				const userInfo = config.knownUsers[userKey];
-				if (userInfo && userInfo.accountCountry && config.blockedCountries.has(userInfo.accountCountry))
+				if (
+					userInfo &&
+					userInfo.accountCountry &&
+					config.blockedCountries.has(userInfo.accountCountry)
+				)
 					reason = reason
 						? `${reason}+Country`
 						: `Country:${userInfo.accountCountry}`;
 				if (
 					!userInfo ||
 					(!userInfo.accountCountry &&
-						!userInfo.reportedCountry &&
 						(!userInfo.ts || nowTs() - userInfo.ts >= UNKNOWN_RETRY_MS))
 				) {
 					queueUser(userKey);
@@ -548,18 +582,20 @@
 		if (document.getElementById("xcb-button")) return;
 		const btn = document.createElement("div");
 		btn.id = "xcb-button";
-		btn.innerHTML = "X";
+		btn.innerHTML = "⚙";
 		btn.title = "Blocker Settings";
 		btn.style =
-			"position:fixed;bottom:20px;right:20px;width:48px;height:48px;background:#000;color:#fff;border-radius:50%;font-size:28px;line-height:48px;text-align:center;cursor:pointer;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.4);";
+			"position:fixed;bottom:20px;left:20px;width:52px;height:52px;background:#1d9bf0;color:#fff;border-radius:50%;font-size:26px;line-height:52px;text-align:center;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2147483647;box-shadow:0 6px 18px rgba(0,0,0,0.35);user-select:none;";
+		btn.tabIndex = 0;
 		document.body.appendChild(btn);
 
 		const modal = document.createElement("div");
 		modal.id = "xcb-modal";
 		modal.style =
 			"display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:10000;align-items:center;justify-content:center;";
-		modal.innerHTML = `<div style="background:#15202b;color:#fff;padding:20px;border-radius:12px;max-width:420px;width:90%;max-height:90vh;overflow:auto;">
+		modal.innerHTML = `<div style="background:#15202b;color:#fff;padding:20px;border-radius:12px;max-width:480px;width:92%;max-height:90vh;overflow:auto;box-shadow:0 10px 30px rgba(0,0,0,0.35);">
             <h2 style="margin:0 0 16px;text-align:center;">X Country & Language Blocker</h2>
+            <div style="font-size:13px;color:#aab8c2;margin-bottom:12px;text-align:center;">Add countries or language scripts to hide matching posts. Session counts shown per filter.</div>
             <strong>Countries</strong><div id="list-c" style="max-height:200px;overflow:auto;margin:8px 0;padding:8px;background:#0002;border-radius:8px;"></div>
             <input id="add-c" placeholder="Add country (e.g. Israel or IL)" style="width:100%;padding:8px;margin:8px 0;border-radius:8px;">
             <strong>Languages</strong><div id="list-l" style="max-height:200px;overflow:auto;margin:8px 0;padding:8px;background:#0002;border-radius:8px;"></div>
@@ -577,7 +613,8 @@
 
 		const updateBlockedDisplay = () => {
 			const counterEl = document.getElementById("xcb-blocked-count");
-			if (counterEl) counterEl.textContent = `Blocked this session: ${blockedCount}`;
+			if (counterEl)
+				counterEl.textContent = `Blocked this session: ${blockedCount}`;
 		};
 		updateBlockedDisplay();
 
@@ -592,10 +629,11 @@
 				.sort()
 				.forEach((c) => {
 					const row = document.createElement("div");
+					row.id = `xcb-c-${c}`;
 					row.style.display = "flex";
 					row.style.justifyContent = "space-between";
 					row.style.padding = "4px 0";
-					row.innerHTML = `<span>${c}</span><span style="cursor:pointer;color:#f00;">×</span>`;
+					row.innerHTML = `<span>${c} <span class="xcb-count" style="color:#aab8c2;">(${blockStats.country[c] || 0})</span></span><span style="cursor:pointer;color:#f00;">×</span>`;
 					row.lastChild.addEventListener("click", () => {
 						config.blockedCountries.delete(c);
 						save();
@@ -612,10 +650,11 @@
 				.sort()
 				.forEach((l) => {
 					const row = document.createElement("div");
+					row.id = `xcb-l-${l}`;
 					row.style.display = "flex";
 					row.style.justifyContent = "space-between";
 					row.style.padding = "4px 0";
-					row.innerHTML = `<span>${l}</span><span style="cursor:pointer;color:#f00;">×</span>`;
+					row.innerHTML = `<span>${l} <span class="xcb-count" style="color:#aab8c2;">(${blockStats.lang[l] || 0})</span></span><span style="cursor:pointer;color:#f00;">×</span>`;
 					row.lastChild.addEventListener("click", () => {
 						config.blockedLangs.delete(l);
 						save();
@@ -627,13 +666,34 @@
 				});
 		};
 
-		btn.onclick = () => {
+		const openModal = () => {
 			modal.style.display = "flex";
 			refreshList();
 			updateBlockedDisplay();
 		};
-		document.getElementById("close").onclick = () =>
-			(modal.style.display = "none");
+		const closeModal = () => (modal.style.display = "none");
+
+		btn.onclick = (e) => {
+			e.stopPropagation();
+			openModal();
+		};
+		btn.onkeydown = (e) => {
+			if (e.key === "Enter" || e.key === " ") {
+				e.preventDefault();
+				openModal();
+			}
+		};
+		modal.addEventListener("click", (e) => {
+			if (e.target === modal) closeModal();
+		});
+		document.addEventListener("keydown", (e) => {
+			if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
+				e.preventDefault();
+				openModal();
+			}
+			if (e.key === "Escape") closeModal();
+		});
+		document.getElementById("close").onclick = () => closeModal();
 		document.getElementById("export-db").onclick = () => {
 			setStatus("DB exported to console");
 			console.log("XCB DB", exportDB());
@@ -643,7 +703,9 @@
 				const v = e.target.value.trim();
 				const code = resolveCountryCode(v);
 				if (!code) {
-					setStatus(`Could not resolve "${v}". Try a 2-letter code or country name.`);
+					setStatus(
+						`Could not resolve "${v}". Try a 2-letter code or country name.`,
+					);
 					return;
 				}
 				config.blockedCountries.add(code);
@@ -696,7 +758,7 @@
 		}
 	}
 
-	start();
+	loadKnownFromDB().finally(() => start());
 
 	console.log(
 		"X Country Blocker v5.1 (CLEAN) ready — nothing blocked until you add it",
